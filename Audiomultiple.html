@@ -1,0 +1,463 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <style>
+    :root {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    }
+    body {
+      margin: 16px;
+      background-color: #00008b;   /* fond bleu foncé */
+      color: #ffd700;               /* texte doré */
+    }
+    .row {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .card {
+      border: 1px solid #ccc;
+      border-radius: 12px;
+      padding: 12px;
+      margin-top: 12px;
+      background: rgba(0, 0, 0, 0.25);
+    }
+    label { font-size: 14px; }
+    input[type="range"] { width: 220px; }
+    button {
+      padding: 8px 12px;
+      border-radius: 8px;
+      border: 1px solid #aaa;
+      background: #f7f7f7;
+      cursor: pointer;
+    }
+    button:disabled {
+      opacity: 0.5;
+      cursor: default;
+    }
+    button:active { transform: scale(0.98); }
+    canvas {
+      width: 100%;
+      height: 220px;
+      background: #000;
+      border-radius: 12px;
+      display: block;
+    }
+    .timebox {
+      width: 3.5rem;
+      text-align: center;
+      padding: 6px;
+      border-radius: 8px;
+      border: 1px solid #aaa;
+      background: #fff;
+      color: #000;
+    }
+    .pill {
+      padding: 4px 8px;
+      background: #eef;
+      border-radius: 999px;
+      font-size: 12px;
+      color: #000;
+    }
+    .hint { color: #ddd; font-size: 12px; }
+    .title { font-weight: 600; font-size: 14px; margin: 6px 0 8px; }
+    #trackName {
+      max-width: 220px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    /* Horloge */
+    #clock {
+      position: fixed;
+      top: 2px;
+      right: 2px;
+      font-size: 16px;
+      font-weight: bold;
+      font-family: 'Courier New', monospace;
+      color: #00ff00;
+      text-shadow: 0 0 8px #00ff00;
+      background: rgba(0, 0, 0, 0.7);
+      padding: 8px 14px;
+      border-radius: 10px;
+      letter-spacing: 2px;
+      z-index: 10;
+    }
+  </style>
+
+  <script>
+    function updateClock() {
+      const now = new Date();
+      const h = String(now.getHours()).padStart(2, '0');
+      const m = String(now.getMinutes()).padStart(2, '0');
+      const s = String(now.getSeconds()).padStart(2, '0');
+      document.getElementById('clock').textContent = `${h}:${m}:${s}`;
+    }
+    setInterval(updateClock, 1000);
+    window.addEventListener('DOMContentLoaded', updateClock);
+  </script>
+</head>
+
+<body>
+  <div id="clock"></div>
+
+  <h3>Audio: Oscilloscope et<br>Minuterie</h3>
+
+  <div class="card">
+    <div class="row">
+      <!-- même si le téléphone ne permet qu'un fichier, on laisse multiple, c'est pas grave -->
+      <input id="file" type="file" accept="audio/*" multiple />
+      <span class="hint">Ajoute des fichiers un par un, ils vont dans la file d’attente.</span>
+    </div>
+
+    <div class="row" style="margin-top:4px">
+      <span class="hint">Piste en cours :</span>
+      <span id="trackName" class="pill">Aucun fichier</span>
+    </div>
+
+    <div class="row" style="margin-top:8px">
+      <button id="playBtn" disabled>▶︎ Play</button>
+      <button id="pauseBtn" disabled>⏸︎ Pause</button>
+      <label for="vol">Volume</label>
+      <input id="vol" type="range" min="0" max="1" step="0.001" value="0.9" />
+      <span id="volVal" class="pill">0.90</span>
+    </div>
+
+    <div class="row" style="margin-top:8px">
+      <button id="prevBtn" disabled>⏮︎ Préc.</button>
+      <button id="nextBtn" disabled>⏭︎ Suiv.</button>
+      <span class="hint">Navigation dans la file d’attente.</span>
+    </div>
+
+    <div class="row" style="margin-top:8px">
+      <label>Minuterie Min/S</label>
+      <input id="mm" class="timebox" type="number" min="0" max="999" value="0" /> :
+      <input id="ss" class="timebox" type="number" min="0" max="59" value="00" />
+      <button id="armTimer">Démarrer</button>
+      <button id="cancelTimer">Annuler</button>
+      <span id="countdown" class="pill">00:00</span>
+    </div>
+
+    <div class="row" style="margin-top:8px">
+      <audio id="player" controls style="width:100%"></audio>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="title">Spectre de fréquences</div>
+    <canvas id="canvasSpectrum" width="1024" height="300"></canvas>
+  </div>
+
+  <div class="card">
+    <div class="title">Signal temporel (oscilloscope)</div>
+    <canvas id="canvasWave" width="1024" height="300"></canvas>
+    <div class="hint" style="margin-top:6px">
+      Si rien ne bouge, touche l’écran. Les navigateurs mobiles exigent une interaction utilisateur.
+    </div>
+  </div>
+
+<script>
+(() => {
+  const fileInput = document.getElementById('file');
+  const audioEl   = document.getElementById('player');
+  const playBtn   = document.getElementById('playBtn');
+  const pauseBtn  = document.getElementById('pauseBtn');
+  const prevBtn   = document.getElementById('prevBtn');
+  const nextBtn   = document.getElementById('nextBtn');
+  const vol       = document.getElementById('vol');
+  const volVal    = document.getElementById('volVal');
+  const trackName = document.getElementById('trackName');
+  const mm        = document.getElementById('mm');
+  const ss        = document.getElementById('ss');
+  const armBtn    = document.getElementById('armTimer');
+  const cancelBtn = document.getElementById('cancelTimer');
+  const countdown = document.getElementById('countdown');
+
+  const canvasSpectrum = document.getElementById('canvasSpectrum');
+  const ctxSpec        = canvasSpectrum.getContext('2d');
+  const canvasWave     = document.getElementById('canvasWave');
+  const ctxWave        = canvasWave.getContext('2d');
+
+  let ac;            // AudioContext
+  let sourceNode;    // MediaElementSource
+  let analyser;      // AnalyserNode
+  let gainNode;      // GainNode
+  let rafId;         // animation frame id
+  let timerId;       // setInterval pour le compte à rebours
+  let stopAt = 0;    // timestamp ms de fin
+
+  // Playlist
+  let playlist = [];
+  let currentIndex = -1;
+
+  async function ensureAudioGraph() {
+    if (!ac) {
+      ac = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
+      gainNode = ac.createGain();
+      analyser = ac.createAnalyser();
+      analyser.fftSize = 2048;
+      analyser.smoothingTimeConstant = 0.85;
+      connectGraph();
+    }
+    if (ac.state === 'suspended') {
+      await ac.resume();
+    }
+  }
+
+  function connectGraph() {
+    if (sourceNode) { try { sourceNode.disconnect(); } catch(e){} }
+    if (!audioEl) return;
+    sourceNode = ac.createMediaElementSource(audioEl);
+    sourceNode.connect(gainNode);
+    gainNode.connect(analyser);
+    analyser.connect(ac.destination);
+  }
+
+  function loadCurrentFile() {
+    const file = playlist[currentIndex];
+    if (!file) {
+      trackName.textContent = 'Aucun fichier';
+      playBtn.disabled = true;
+      pauseBtn.disabled = true;
+      prevBtn.disabled = true;
+      nextBtn.disabled = true;
+      return;
+    }
+    const url = URL.createObjectURL(file);
+    audioEl.src = url;
+    audioEl.load();
+    trackName.textContent = file.name;
+    playBtn.disabled = false;
+    pauseBtn.disabled = false;
+    prevBtn.disabled = (playlist.length <= 1);
+    nextBtn.disabled = (playlist.length <= 1);
+  }
+
+  function clearCanvas(ctx, w, h) {
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, w, h);
+  }
+
+  function drawSpectrum() {
+    const w = canvasSpectrum.width;
+    const h = canvasSpectrum.height;
+    clearCanvas(ctxSpec, w, h);
+
+    const bufferLength = analyser.frequencyBinCount;
+    const dataArray = new Uint8Array(bufferLength);
+    analyser.getByteFrequencyData(dataArray);
+
+    const barCount = Math.min(160, bufferLength);
+    const step = Math.floor(bufferLength / barCount);
+    const barWidth = w / barCount;
+
+    ctxSpec.fillStyle = 'white';
+    for (let i = 0; i < barCount; i++) {
+      const v = dataArray[i * step] / 255;
+      const barHeight = v * (h - 10);
+      const x = i * barWidth;
+      const y = h - barHeight;
+      ctxSpec.fillRect(x, y, Math.max(1, barWidth - 1), barHeight);
+    }
+  }
+
+  function drawWave() {
+    const w = canvasWave.width;
+    const h = canvasWave.height;
+    clearCanvas(ctxWave, w, h);
+
+    const bufferLength = analyser.fftSize;
+    const dataArray = new Uint8Array(bufferLength);
+    analyser.getByteTimeDomainData(dataArray);
+
+    ctxWave.strokeStyle = 'white';
+    ctxWave.lineWidth = 1;
+    ctxWave.beginPath();
+    ctxWave.moveTo(0, h/2);
+    ctxWave.lineTo(w, h/2);
+    ctxWave.stroke();
+
+    ctxWave.beginPath();
+    const slice = w / bufferLength;
+    for (let i = 0; i < bufferLength; i++) {
+      const v = (dataArray[i] - 128) / 128;
+      const y = h/2 - v * (h * 0.45);
+      const x = i * slice;
+      if (i === 0) ctxWave.moveTo(x, y);
+      else ctxWave.lineTo(x, y);
+    }
+    ctxWave.stroke();
+  }
+
+  function drawLoop() {
+    if (!analyser) return;
+    drawSpectrum();
+    drawWave();
+    rafId = requestAnimationFrame(drawLoop);
+  }
+
+  function startDraw() {
+    if (rafId) cancelAnimationFrame(rafId);
+    rafId = requestAnimationFrame(drawLoop);
+  }
+
+  function stopDraw() {
+    if (rafId) cancelAnimationFrame(rafId);
+    rafId = null;
+    clearCanvas(ctxSpec, canvasSpectrum.width, canvasSpectrum.height);
+    clearCanvas(ctxWave, canvasWave.width, canvasWave.height);
+  }
+
+  // Volume
+  vol.addEventListener('input', () => {
+    const v = parseFloat(vol.value);
+    volVal.textContent = v.toFixed(2);
+    if (gainNode) gainNode.gain.value = v;
+  });
+
+  // Ajout à la playlist à chaque sélection
+  fileInput.addEventListener('change', async (e) => {
+    const files = Array.from(e.target.files || []);
+    if (!files.length) return;
+
+    // sur mobile, souvent un seul fichier, on prend le premier
+    const file = files[0];
+    playlist.push(file);
+
+    // si c'est le premier de la playlist
+    if (currentIndex === -1) {
+      currentIndex = 0;
+      await ensureAudioGraph();
+      gainNode.gain.value = parseFloat(vol.value);
+      loadCurrentFile();
+    } else {
+      prevBtn.disabled = (playlist.length <= 1);
+      nextBtn.disabled = (playlist.length <= 1);
+    }
+
+    // permet de re-sélectionner le même fichier plus tard
+    fileInput.value = "";
+  });
+
+  // Play/Pause
+  playBtn.addEventListener('click', async () => {
+    await ensureAudioGraph();
+    if (audioEl.src) {
+      await audioEl.play();
+      startDraw();
+    }
+  });
+
+  pauseBtn.addEventListener('click', () => {
+    audioEl.pause();
+    stopDraw();
+  });
+
+  // Précédent / Suivant
+  prevBtn.addEventListener('click', async () => {
+    if (playlist.length === 0) return;
+    currentIndex = (currentIndex - 1 + playlist.length) % playlist.length;
+    loadCurrentFile();
+    await ensureAudioGraph();
+    audioEl.play();
+    startDraw();
+  });
+
+  nextBtn.addEventListener('click', async () => {
+    if (playlist.length === 0) return;
+    currentIndex = (currentIndex + 1) % playlist.length;
+    loadCurrentFile();
+    await ensureAudioGraph();
+    audioEl.play();
+    startDraw();
+  });
+
+  // Minuterie
+  function formatMMSS(totalSec) {
+    const m = Math.floor(totalSec / 60);
+    const s = Math.max(0, totalSec % 60);
+    return String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+  }
+
+  function clearTimer() {
+    stopAt = 0;
+    if (timerId) clearInterval(timerId);
+    timerId = null;
+    countdown.textContent = '00:00';
+  }
+
+  armBtn.addEventListener('click', () => {
+    const m = Math.max(0, parseInt(mm.value || '0', 10));
+    const s = Math.max(0, Math.min(59, parseInt(ss.value || '0', 10)));
+    const total = m * 60 + s;
+    if (total <= 0) {
+      clearTimer();
+      return;
+    }
+    stopAt = Date.now() + total * 1000;
+    if (timerId) clearInterval(timerId);
+    timerId = setInterval(() => {
+      const remainMs = stopAt - Date.now();
+      const remain = Math.max(0, Math.round(remainMs / 1000));
+      countdown.textContent = formatMMSS(remain);
+      if (remain <= 0) {
+        audioEl.pause();
+        audioEl.currentTime = 0;
+        clearTimer();
+        stopDraw();
+      }
+    }, 250);
+  });
+
+  cancelBtn.addEventListener('click', clearTimer);
+
+  // Resize canvases
+  function resizeCanvas(el, ctx) {
+    const rect = el.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    el.width  = Math.round(rect.width * dpr);
+    el.height = Math.round(220 * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  function handleResize() {
+    resizeCanvas(canvasSpectrum, ctxSpec);
+    resizeCanvas(canvasWave, ctxWave);
+  }
+  window.addEventListener('resize', handleResize, { passive: true });
+  handleResize();
+
+  // Auto-piste suivante quand ça finit
+  audioEl.addEventListener('ended', async () => {
+    clearTimer();
+    if (playlist.length > 1 && currentIndex >= 0) {
+      currentIndex = (currentIndex + 1) % playlist.length;
+      loadCurrentFile();
+      await ensureAudioGraph();
+      audioEl.play();
+      startDraw();
+    } else {
+      stopDraw();
+    }
+  });
+
+  // Sync avec les contrôles natifs
+  audioEl.addEventListener('pause', () => stopDraw());
+  audioEl.addEventListener('play', async () => {
+    await ensureAudioGraph();
+    startDraw();
+  });
+
+  // Mobile : réveiller l'audioContext
+  document.body.addEventListener('touchend', async () => {
+    if (ac && ac.state === 'suspended') await ac.resume();
+  }, { passive: true });
+})();
+</script>
+</body>
+</html>
