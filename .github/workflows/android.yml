@@ -1,21 +1,25 @@
-name: Generer AAB non signe
+name: Construire AAB Lecteur Audio
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths-ignore:
-      - "README.md"
 
 permissions:
   contents: read
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+
+    env:
+      CI: "true"
+      CORDOVA_TELEMETRY_OFF: "1"
+      APP_ID: com.absabefi.lecteuraudio
+      APP_NAME: Lecteur Audio
+      APP_VERSION: "1.0.0"
 
     steps:
-      - name: Recuperer le site
+      - name: Recuperer les fichiers du depot
         uses: actions/checkout@v4
 
       - name: Installer Node.js
@@ -29,12 +33,16 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Installer Android SDK
+      - name: Configurer Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Installer les outils Android
+      - name: Installer Android 35
+        shell: bash
         run: |
-          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+          set -euo pipefail
+          sdkmanager "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
 
       - name: Installer Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -47,26 +55,178 @@ jobs:
       - name: Creer le projet Android
         shell: bash
         run: |
-          APP_DIR="$RUNNER_TEMP/lecteur-audio"
-          cordova create "$APP_DIR" com.absabefi.lecteuraudio "Lecteur Audio"
+          set -euo pipefail
 
-          rsync -a \
-            --exclude='.git/' \
-            --exclude='.github/' \
-            "$GITHUB_WORKSPACE/" "$APP_DIR/www/"
+          test -s "$GITHUB_WORKSPACE/index.html" || {
+            echo "::error::Le fichier index.html manque a la racine du depot."
+            exit 1
+          }
 
-          cd "$APP_DIR"
-          cordova platform add android@14.0.1
+          cordova create \
+            "$RUNNER_TEMP/lecteur-audio" \
+            "$APP_ID" \
+            "$APP_NAME"
 
-      - name: Generer le AAB non signe
+      - name: Copier le site et configurer application
         shell: bash
         run: |
-          cd "$RUNNER_TEMP/lecteur-audio"
+          set -euo pipefail
+
+          python3 <<'PY'
+          import os
+          import shutil
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          source = Path(os.environ["GITHUB_WORKSPACE"])
+          project = Path(os.environ["RUNNER_TEMP"]) / "lecteur-audio"
+          www = project / "www"
+
+          shutil.rmtree(www)
+          www.mkdir()
+
+          excluded = {
+              "node_modules", "platforms", "plugins",
+              "dist", "build", "artifacts"
+          }
+
+          def ignore(directory, names):
+              return [
+                  name for name in names
+                  if name.startswith(".") or name in excluded
+              ]
+
+          for item in source.iterdir():
+              if item.name.startswith(".") or item.name in excluded:
+                  continue
+              destination = www / item.name
+              if item.is_dir():
+                  shutil.copytree(item, destination, ignore=ignore)
+              else:
+                  shutil.copy2(item, destination)
+
+          namespace = "http://www.w3.org/ns/widgets"
+          ET.register_namespace("", namespace)
+          ET.register_namespace(
+              "cdv", "http://cordova.apache.org/ns/1.0"
+          )
+
+          def tag(name):
+              return f"{{{namespace}}}{name}"
+
+          config = project / "config.xml"
+          tree = ET.parse(config)
+          root = tree.getroot()
+          root.set("version", os.environ["APP_VERSION"])
+          root.set(
+              "android-versionCode",
+              str(int(os.environ["GITHUB_RUN_NUMBER"]))
+          )
+
+          content = root.find(tag("content"))
+          if content is None:
+              content = ET.SubElement(root, tag("content"))
+          content.set("src", "index.html")
+
+          access = root.find(tag("access"))
+          if access is None:
+              access = ET.SubElement(root, tag("access"))
+          access.set("origin", "*")
+
+          for name, value in {
+              "android-minSdkVersion": "24",
+              "android-targetSdkVersion": "35",
+          }.items():
+              ET.SubElement(
+                  root, tag("preference"),
+                  {"name": name, "value": value}
+              )
+
+          icon = source / "icon-512.png"
+          if icon.is_file():
+              resources = project / "res"
+              resources.mkdir(exist_ok=True)
+              shutil.copy2(icon, resources / "icon.png")
+              ET.SubElement(
+                  root, tag("icon"), {"src": "res/icon.png"}
+              )
+
+          tree.write(config, encoding="utf-8", xml_declaration=True)
+          print("Site copie et configuration terminee.")
+          PY
+
+      - name: Ajouter la plateforme Android
+        working-directory: ${{ runner.temp }}/lecteur-audio
+        run: cordova platform add android@14.0.1
+
+      - name: Compiler le AAB non signe
+        working-directory: ${{ runner.temp }}/lecteur-audio
+        shell: bash
+        run: |
+          set -euo pipefail
           cordova build android --release -- --packageType=bundle
 
-      - name: Rendre le AAB telechargeable
+      - name: Verifier et preparer le AAB
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          import os
+          import shutil
+          import zipfile
+          from pathlib import Path
+
+          temporary = Path(os.environ["RUNNER_TEMP"])
+          outputs = (
+              temporary / "lecteur-audio" / "platforms" /
+              "android" / "app" / "build" / "outputs"
+          )
+
+          candidates = [
+              path for path in outputs.rglob("*.aab")
+              if path.is_file() and path.stat().st_size > 0
+          ]
+
+          if len(candidates) != 1:
+              print(
+                  "::error::Un seul AAB attendu, "
+                  f"{len(candidates)} trouve(s)."
+              )
+              for path in candidates:
+                  print(path)
+              raise SystemExit(1)
+
+          bundle = candidates[0]
+          with zipfile.ZipFile(bundle) as archive:
+              required = {
+                  "BundleConfig.pb",
+                  "base/manifest/AndroidManifest.xml",
+              }
+              if not required.issubset(set(archive.namelist())):
+                  raise SystemExit(
+                      "::error::Le fichier produit n'est pas "
+                      "un Android App Bundle valide."
+                  )
+              if archive.testzip() is not None:
+                  raise SystemExit(
+                      "::error::Le fichier AAB est corrompu."
+                  )
+
+          destination = temporary / "aab-export"
+          destination.mkdir(exist_ok=True)
+          final = destination / "Lecteur-Audio-non-signe.aab"
+          shutil.copy2(bundle, final)
+
+          print(f"AAB pret : {final}")
+          print(f"Taille : {final.stat().st_size} octets")
+          PY
+
+      - name: Publier le fichier AAB
         uses: actions/upload-artifact@v4
         with:
           name: lecteur-audio-AAB-non-signe
-          path: ${{ runner.temp }}/lecteur-audio/platforms/android/app/build/outputs/bundle/release/*.aab
+          path: ${{ runner.temp }}/aab-export/Lecteur-Audio-non-signe.aab
           if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
