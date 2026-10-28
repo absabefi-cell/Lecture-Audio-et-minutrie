@@ -1,1 +1,72 @@
-.github/workflows/android.yml
+name: Generer AAB non signe
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "README.md"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Recuperer le site
+        uses: actions/checkout@v4
+
+      - name: Installer Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Installer Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Installer Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Installer les outils Android
+        run: |
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Installer Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.13"
+
+      - name: Installer Cordova
+        run: npm install -g cordova@12.0.0
+
+      - name: Creer le projet Android
+        shell: bash
+        run: |
+          APP_DIR="$RUNNER_TEMP/lecteur-audio"
+          cordova create "$APP_DIR" com.absabefi.lecteuraudio "Lecteur Audio"
+
+          rsync -a \
+            --exclude='.git/' \
+            --exclude='.github/' \
+            "$GITHUB_WORKSPACE/" "$APP_DIR/www/"
+
+          cd "$APP_DIR"
+          cordova platform add android@14.0.1
+
+      - name: Generer le AAB non signe
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP/lecteur-audio"
+          cordova build android --release -- --packageType=bundle
+
+      - name: Rendre le AAB telechargeable
+        uses: actions/upload-artifact@v4
+        with:
+          name: lecteur-audio-AAB-non-signe
+          path: ${{ runner.temp }}/lecteur-audio/platforms/android/app/build/outputs/bundle/release/*.aab
+          if-no-files-found: error
