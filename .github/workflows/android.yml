@@ -2,6 +2,15 @@ name: Construire AAB Lecteur Audio
 
 on:
   workflow_dispatch:
+    inputs:
+      version_code:
+        description: "Numero de version (plus haut que le dernier envoye au Play Store)"
+        required: true
+        default: "2"
+      version_name:
+        description: "Nom de version affiche (ex. 1.0.1)"
+        required: true
+        default: "1.0.1"
 
 permissions:
   contents: read
@@ -14,6 +23,9 @@ jobs:
     steps:
       - name: Recuperer le depot
         uses: actions/checkout@v4
+
+      - name: Afficher les fichiers du depot
+        run: ls -la "$GITHUB_WORKSPACE"
 
       - name: Configurer Node.js
         uses: actions/setup-node@v4
@@ -66,13 +78,12 @@ jobs:
           for item in source.iterdir():
               if item.name in excluded:
                   continue
-
               destination = target / item.name
-
               if item.is_dir():
                   shutil.copytree(item, destination)
               else:
                   shutil.copy2(item, destination)
+              print("Copie :", item.name)
 
           if not (target / "index.html").is_file():
               raise SystemExit(
@@ -81,53 +92,39 @@ jobs:
 
       - name: Configurer le lecteur
         shell: python
+        env:
+          VERSION_CODE: ${{ inputs.version_code }}
+          VERSION_NAME: ${{ inputs.version_name }}
         run: |
           import os
           import xml.etree.ElementTree as ET
           from pathlib import Path
 
-          path = (
-              Path(os.environ["RUNNER_TEMP"])
-              / "lecteur-audio"
-              / "config.xml"
-          )
+          path = Path(os.environ["RUNNER_TEMP"]) / "lecteur-audio" / "config.xml"
 
           ns = "http://www.w3.org/ns/widgets"
           ET.register_namespace("", ns)
-          ET.register_namespace(
-              "cdv",
-              "http://cordova.apache.org/ns/1.0"
-          )
+          ET.register_namespace("cdv", "http://cordova.apache.org/ns/1.0")
 
           tree = ET.parse(path)
           root = tree.getroot()
 
           root.set("id", "com.absabefi.lecteuraudio")
-          root.set("version", "1.0.0")
-          root.set("android-versionCode", "1")
+          root.set("version", os.environ["VERSION_NAME"])
+          root.set("android-versionCode", os.environ["VERSION_CODE"])
 
           content = root.find(f"{{{ns}}}content")
           if content is None:
-              content = ET.SubElement(
-                  root, f"{{{ns}}}content"
-              )
+              content = ET.SubElement(root, f"{{{ns}}}content")
           content.set("src", "index.html")
 
           for element in list(root):
               if element.tag == f"{{{ns}}}access":
                   root.remove(element)
+          ET.SubElement(root, f"{{{ns}}}access", {"origin": "*"})
 
-          ET.SubElement(
-              root,
-              f"{{{ns}}}access",
-              {"origin": "*"}
-          )
-
-          tree.write(
-              path,
-              encoding="utf-8",
-              xml_declaration=True
-          )
+          tree.write(path, encoding="utf-8", xml_declaration=True)
+          print(path.read_text(encoding="utf-8"))
 
       - name: Ajouter Android
         working-directory: ${{ runner.temp }}/lecteur-audio
@@ -135,20 +132,34 @@ jobs:
 
       - name: Construire le AAB non signe
         working-directory: ${{ runner.temp }}/lecteur-audio
-        run: cordova build android --release -- --packageType=bundle
+        run: cordova build android --release --verbose -- --packageType=bundle
 
-      - name: Recuperer le AAB
+      - name: Verifier et recuperer le AAB
         shell: bash
         run: |
           AAB_PATH="$RUNNER_TEMP/lecteur-audio/platforms/android/app/build/outputs/bundle/release/app-release.aab"
 
           if [ ! -f "$AAB_PATH" ]; then
-            echo "Erreur : fichier AAB introuvable."
+            echo "Erreur : fichier AAB introuvable. Contenu du dossier outputs :"
+            find "$RUNNER_TEMP/lecteur-audio/platforms/android/app/build/outputs" -type f || true
             exit 1
           fi
 
-          cp "$AAB_PATH" \
-            "$GITHUB_WORKSPACE/Lecteur-Audio-non-signe.aab"
+          echo "Taille du AAB :"
+          ls -lh "$AAB_PATH"
+
+          if [ ! -s "$AAB_PATH" ]; then
+            echo "Erreur : le AAB fait 0 octet."
+            exit 1
+          fi
+
+          echo "Fichiers web dans le AAB :"
+          unzip -l "$AAB_PATH" | grep "assets/www/" || {
+            echo "Erreur : aucun fichier web dans le AAB."
+            exit 1
+          }
+
+          cp "$AAB_PATH" "$GITHUB_WORKSPACE/Lecteur-Audio-non-signe.aab"
 
       - name: Telecharger le AAB
         uses: actions/upload-artifact@v4
@@ -156,4 +167,5 @@ jobs:
           name: lecteur-audio-AAB-non-signe
           path: Lecteur-Audio-non-signe.aab
           if-no-files-found: error
+          compression-level: 0
           retention-days: 14
